@@ -117,6 +117,8 @@ class TradingEngine:
             buy_order = await self.exchange_manager.place_order(
                 opportunity.buy_exchange, opportunity.symbol, 'limit', 'buy', trade.amount, opportunity.buy_price
             )
+            if not buy_order or not isinstance(buy_order, dict) or 'price' not in buy_order or buy_order['price'] is None:
+                raise ValueError(f"Buy order failed or returned invalid price: {buy_order}")
             trade.buy_order_id = buy_order['id']
             trade.buy_price = float(buy_order['price'])
             trade.status = TradeStatus.BUY_FILLED

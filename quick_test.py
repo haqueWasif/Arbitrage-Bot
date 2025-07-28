@@ -166,7 +166,7 @@ async def quick_performance_test():
     }
     
     # Save report
-    with open('/quick_test_report.json', 'w') as f:
+    with open('quick_test_report.json', 'w') as f:
         json.dump(report, f, indent=2)
     
     print(f"\nDetailed report saved to: quick_test_report.json")
@@ -175,4 +175,3 @@ async def quick_performance_test():
 
 if __name__ == "__main__":
     asyncio.run(quick_performance_test())
-
