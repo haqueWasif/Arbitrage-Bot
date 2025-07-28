@@ -78,99 +78,122 @@ class TradingEngine:
             "Trading Disabled", "Trading has been manually disabled.", "warning", "TradingEngine"
         )
 
+
     async def execute_arbitrage_trade(self, opportunity: ArbitrageOpportunity):
-        if not self.trading_enabled:
-            logger.info(f"Skipping trade for {opportunity.symbol} due to trading being disabled.")
-            return
-
-        if self.safety_manager.is_circuit_breaker_active():
-            logger.warning(f"Skipping trade for {opportunity.symbol}: Circuit breaker active.")
-            self.monitoring_system.alert_manager.create_alert(
-                "Trade Skipped", f"Trade for {opportunity.symbol} skipped due to active circuit breaker.", "warning", "TradingEngine"
-            )
-            return
-
-        trade_id = str(uuid.uuid4())
-        trade = Trade(id=trade_id, opportunity=opportunity, amount=opportunity.max_quantity)
-        self.active_trades[trade_id] = trade
-        self.total_trades += 1
+      if not self.trading_enabled:
+         logger.info(f"Skipping trade for {opportunity.symbol} due to trading being disabled.")
+         return
+  
+      if self.safety_manager.is_circuit_breaker_active():
+         logger.warning(f"Skipping trade for {opportunity.symbol}: Circuit breaker active.")
+         self.monitoring_system.alert_manager.create_alert(
+             "Trade Skipped", f"Trade for {opportunity.symbol} skipped due to active circuit breaker.", "warning", "TradingEngine"
+         )
+         return
+  
+      trade_id = str(uuid.uuid4())
+      trade = Trade(id=trade_id, opportunity=opportunity, amount=opportunity.max_quantity)
+      self.active_trades[trade_id] = trade
+      self.total_trades += 1
+  
+      # Reset daily trades if day changed
+      if datetime.now().day != self.last_day_reset:
+         self.todays_trades = 0
+         self.last_day_reset = datetime.now().day
+      self.todays_trades += 1
+  
+      logger.info(f"Attempting arbitrage trade {trade_id} for {opportunity.symbol} between {opportunity. buy_exchange} and {opportunity.sell_exchange}")
+      self.monitoring_system.alert_manager.create_alert(
+         "Trade Attempt", f"Attempting arbitrage for {opportunity.symbol}. Profit: {opportunity.potential_profit_pct:.2f}%", "info", "TradingEngine"
+     )
+  
+      buy_fee = 0.0
+      sell_fee = 0.0
+  
+      try:
+         ticker = await self.exchange_manager.fetch_ticker(opportunity.buy_exchange, opportunity.symbol)
+         if ticker is None or ticker.get('ask') is None:
+            raise ValueError(f"Could not fetch ticker or ask price for {opportunity.symbol} on {opportunity.buy_exchange}")
+         opportunity.buy_price = float(ticker['ask'])  # Use the ask price for buying
         
-        # Reset daily trades if day has changed
-        if datetime.now().day != self.last_day_reset:
-            self.todays_trades = 0
-            self.last_day_reset = datetime.now().day
-        self.todays_trades += 1
+        
+         # --- STEP 1: PLACE BUY ORDER ---
+         trade.status = TradeStatus.EXECUTING_BUY
+         logger.info(f"Placing buy order for {trade.amount} {opportunity.symbol} on {opportunity.buy_exchange} at {opportunity.buy_price}")
 
-        logger.info(f"Attempting arbitrage trade {trade_id} for {opportunity.symbol} between {opportunity.buy_exchange} and {opportunity.sell_exchange}")
-        self.monitoring_system.alert_manager.create_alert(
-            "Trade Attempt", f"Attempting arbitrage for {opportunity.symbol}. Profit: {opportunity.potential_profit_pct:.2f}%", "info", "TradingEngine"
-        )
-
-        # Initialize fee variables to avoid NameError
-        buy_fee = 0.0
-        sell_fee = 0.0
-
-        try:
-            # Step 1: Place Buy Order
-            trade.status = TradeStatus.EXECUTING_BUY
-            logger.info(f"Placing buy order for {trade.amount} {opportunity.symbol} on {opportunity.buy_exchange} at {opportunity.buy_price}")
-            buy_order = await self.exchange_manager.place_order(
-                opportunity.buy_exchange, opportunity.symbol, 'limit', 'buy', trade.amount, opportunity.buy_price
-            )
-            if not buy_order or not isinstance(buy_order, dict) or 'price' not in buy_order or buy_order['price'] is None:
-                raise ValueError(f"Buy order failed or returned invalid price: {buy_order}")
-            trade.buy_order_id = buy_order['id']
-            trade.buy_price = float(buy_order['price'])
-            trade.status = TradeStatus.BUY_FILLED
-            logger.info(f"Buy order {trade.buy_order_id} filled on {opportunity.buy_exchange}.")
-
-            # Step 2: Place Sell Order
-            trade.status = TradeStatus.EXECUTING_SELL
-            logger.info(f"Placing sell order for {trade.amount} {opportunity.symbol} on {opportunity.sell_exchange} at {opportunity.sell_price}")
-            sell_order = await self.exchange_manager.place_order(
-                opportunity.sell_exchange, opportunity.symbol, 'limit', 'sell', trade.amount, opportunity.sell_price
-            )
-            trade.sell_order_id = sell_order['id']
-            trade.sell_price = float(sell_order["price"]) if sell_order and "price" in sell_order and sell_order["price"] is not None else opportunity.sell_price
-            trade.status = TradeStatus.SELL_FILLED
-            logger.info(f"Sell order {trade.sell_order_id} filled on {opportunity.sell_exchange}.")
-
-            # Step 3: Calculate Profit and Complete Trade
-            revenue = trade.amount * trade.sell_price
-            cost = trade.amount * trade.buy_price
-            
-            # Calculate fees
-            buy_fee = trade.amount * trade.buy_price * self.exchange_manager.get_exchange_trading_fee(opportunity.buy_exchange)
-            sell_fee = trade.amount * trade.sell_price * self.exchange_manager.get_exchange_trading_fee(opportunity.sell_exchange)
-            total_fees = buy_fee + sell_fee
-            
-            trade.actual_profit_usd = revenue - cost - total_fees
-            trade.execution_time_ms = (time.time() - trade.timestamp) * 1000
-            trade.status = TradeStatus.COMPLETED
-            self.successful_trades += 1
-            self.total_profit_usd += trade.actual_profit_usd
-            self.safety_manager.record_profit(trade.actual_profit_usd)
-            
-            logger.info(f"Trade {trade_id} completed. Profit: ${trade.actual_profit_usd:.2f}")
-            self.monitoring_system.alert_manager.create_alert(
-                "Trade Completed", f"Trade {trade_id} for {opportunity.symbol} completed. Profit: ${trade.actual_profit_usd:.2f}", "success", "TradingEngine"
-            )
-
-        except Exception as e:
-            trade.status = TradeStatus.FAILED
-            trade.error_message = str(e)
-            # Calculate potential loss for failed trade
-            potential_loss = -(trade.amount * trade.buy_price) if trade.buy_price else 0.0
-            self.safety_manager.record_loss(potential_loss) # Record as loss if failed
-            logger.error(f"Trade {trade_id} failed: {e}")
-            self.error_handler.handle_error(e, ErrorCategory.TRADING, ErrorSeverity.HIGH, "TradingEngine", f"Trade execution failed for {opportunity.symbol}")
-            self.monitoring_system.alert_manager.create_alert(
-                "Trade Failed", f"Trade {trade_id} for {opportunity.symbol} failed: {e}", "error", "TradingEngine"
-            )
-        finally:
-            self.completed_trades.append(trade)
-            if trade_id in self.active_trades:
-                del self.active_trades[trade_id]
+         buy_order = await self.exchange_manager.place_order(
+             opportunity.buy_exchange, opportunity.symbol, 'limit', 'buy', trade.amount, opportunity.buy_price
+         )
+ 
+         # If missing price, fetch details
+         if not buy_order or buy_order.get('price') is None:
+             if buy_order and buy_order.get('id'):
+                 logger.warning(f"Buy order missing price, fetching details for {buy_order['id']}...")
+                 buy_order = await self.exchange_manager.fetch_order(opportunity.buy_exchange, opportunity.symbol, buy_order['id'])
+ 
+         # Validate
+         if not buy_order or buy_order.get('price') is None:
+             raise ValueError(f"Buy order failed or returned invalid price after fetch: {buy_order}")
+ 
+         trade.buy_order_id = buy_order['id']
+         trade.buy_price = float(buy_order.get('price', opportunity.buy_price))
+         trade.status = TradeStatus.BUY_FILLED
+         logger.info(f"Buy order {trade.buy_order_id} filled on {opportunity.buy_exchange}.")
+ 
+         # --- STEP 2: PLACE SELL ORDER ---
+         trade.status = TradeStatus.EXECUTING_SELL
+         logger.info(f"Placing sell order for {trade.amount} {opportunity.symbol} on {opportunity.sell_exchange} at {opportunity.sell_price}")
+ 
+         sell_order = await self.exchange_manager.place_order(
+             opportunity.sell_exchange, opportunity.symbol, 'limit', 'sell', trade.amount, opportunity.sell_price
+         )
+ 
+         # If missing price, fetch details
+         if not sell_order or sell_order.get('price') is None:
+             if sell_order and sell_order.get('id'):
+                 logger.warning(f"Sell order missing price, fetching details for {sell_order['id']}...")
+                 sell_order = await self.exchange_manager.fetch_order(opportunity.sell_exchange, opportunity.symbol, sell_order['id'])
+ 
+         trade.sell_order_id = sell_order['id'] if sell_order else None
+         trade.sell_price = float(sell_order.get('price', opportunity.sell_price)) if sell_order else opportunity.sell_price
+         trade.status = TradeStatus.SELL_FILLED
+         logger.info(f"Sell order {trade.sell_order_id} filled on {opportunity.sell_exchange}.")
+ 
+         # --- STEP 3: CALCULATE PROFIT ---
+         revenue = trade.amount * trade.sell_price
+         cost = trade.amount * trade.buy_price
+ 
+         buy_fee = trade.amount * trade.buy_price * self.exchange_manager.get_exchange_trading_fee(opportunity.buy_exchange)
+         sell_fee = trade.amount * trade.sell_price * self.exchange_manager.get_exchange_trading_fee(opportunity.sell_exchange)
+         total_fees = buy_fee + sell_fee
+ 
+         trade.actual_profit_usd = revenue - cost - total_fees
+         trade.execution_time_ms = (time.time() - trade.timestamp) * 1000
+         trade.status = TradeStatus.COMPLETED
+ 
+         self.successful_trades += 1
+         self.total_profit_usd += trade.actual_profit_usd
+         self.safety_manager.record_profit(trade.actual_profit_usd)
+ 
+         logger.info(f"Trade {trade_id} completed. Profit: ${trade.actual_profit_usd:.2f}")
+         self.monitoring_system.alert_manager.create_alert(
+             "Trade Completed", f"Trade {trade_id} for {opportunity.symbol} completed. Profit: ${trade.actual_profit_usd:.2f}", "success", "TradingEngine"
+         )
+  
+      except Exception as e:
+         trade.status = TradeStatus.FAILED
+         trade.error_message = str(e)
+         potential_loss = -(trade.amount * trade.buy_price) if trade.buy_price else 0.0
+         self.safety_manager.record_loss(potential_loss)
+         logger.error(f"Trade {trade_id} failed: {e}")
+         self.error_handler.handle_error(e, ErrorCategory.TRADING, ErrorSeverity.HIGH, "TradingEngine", f"Trade execution failed for {opportunity.symbol}")
+         self.monitoring_system.alert_manager.create_alert(
+             "Trade Failed", f"Trade {trade_id} for {opportunity.symbol} failed: {e}", "error", "TradingEngine"
+         )
+      finally:
+         self.completed_trades.append(trade)
+         if trade_id in self.active_trades:
+            del self.active_trades[trade_id]
 
     def get_trading_statistics(self) -> Dict[str, Any]:
         success_rate = (self.successful_trades / self.total_trades * 100) if self.total_trades > 0 else 0
