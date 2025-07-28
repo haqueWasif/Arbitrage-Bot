@@ -580,4 +580,3 @@ class SafetyManager:
             pass  # psutil not available
         
         logger.debug("Safety check completed")
-

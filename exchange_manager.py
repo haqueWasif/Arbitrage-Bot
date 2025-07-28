@@ -124,15 +124,12 @@ class ExchangeManager:
         order = None
         try:
             # Check for notional filter (minimum order value)
-            market = exchange.markets.get(symbol)
-            if market and 'limits' in market and 'notional' in market['limits']:
-                min_notional = market['limits']['notional']['min']
+            if 'limits' in exchange.markets[symbol] and 'notional' in exchange.markets[symbol]['limits']:
+                min_notional = exchange.markets[symbol]['limits']['notional']['min']
                 if price and (amount * price) < min_notional:
-                    logger.warning(f"Amount {amount} * Price {price} = {amount * price} is less than min notional {min_notional} for {symbol} on {exchange_id}.")
-                    # Adjust amount to meet min_notional, adding a small buffer
-                    adjusted_amount = (min_notional / price) * 1.01 # Add 1% buffer
-                    logger.warning(f"Adjusting amount from {amount} to {adjusted_amount} to meet min notional value.")
-                    amount = adjusted_amount
+                    logger.warning(f"Adjusting amount for {symbol} on {exchange_id} to meet min notional value. Original amount: {amount}, Price: {price}, Min Notional: {min_notional}")
+                    amount = min_notional / price
+                    logger.warning(f"New adjusted amount: {amount}")
 
             if order_type == "limit":
                 if side == "buy":
@@ -166,11 +163,8 @@ class ExchangeManager:
             
             logger.info(f"DEBUG: Type of order after call: {type(order)}")
 
-        except ccxt.ExchangeError as e:
-            logger.error(f"Exchange error placing {side} {order_type} order for {amount} {symbol} on {exchange_id}: {e}")
-            return None
         except Exception as e:
-            logger.error(f"Unexpected error placing {side} {order_type} order for {amount} {symbol} on {exchange_id}: {e}")
+            logger.error(f"Failed to place {side} {order_type} order for {amount} {symbol} on {exchange_id}: {e}")
             return None
         
         logger.info(f"Placed {side} {order_type} order {order.get('id', 'N/A')} for {amount} {symbol} on {exchange_id}.")
@@ -240,4 +234,3 @@ class ExchangeManager:
             return config["trading_fee"]
         logger.warning(f"Trading fee not found for {exchange_id}. Returning default 0.001.")
         return 0.001
-
