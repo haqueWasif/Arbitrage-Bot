@@ -13,6 +13,7 @@ from price_monitor import PriceMonitor
 from safety_manager import SafetyManager
 from error_handler import ErrorHandler, ErrorCategory, ErrorSeverity
 from monitoring import MonitoringSystem
+from websocket_manager import WebSocketManager
 from config import TRADING_CONFIG, RISK_CONFIG, PERFORMANCE_CONFIG, LOGGING_CONFIG
 
 logger = logging.getLogger(__name__)
@@ -214,7 +215,8 @@ class ArbitrageBot:
         self.monitoring_system = MonitoringSystem(config)
         self.error_handler = ErrorHandler(self.monitoring_system)
         self.safety_manager = SafetyManager(self.monitoring_system, config["RISK_CONFIG"])
-        self.price_monitor = PriceMonitor(self.exchange_manager, self.monitoring_system, config["PERFORMANCE_CONFIG"])
+        self.websocket_manager = WebSocketManager(config)
+        self.price_monitor = PriceMonitor(self.exchange_manager, self.monitoring_system, config["PERFORMANCE_CONFIG"], self.websocket_manager)
         self.trading_engine = TradingEngine(self.exchange_manager, self.safety_manager, self.error_handler, self.monitoring_system)
         
         self.is_running = False

@@ -72,6 +72,8 @@ class SafetyManager:
         self.circuit_breaker_active = False
         self.last_trade_time = None
         self.initial_balances: Dict[str, Dict[str, float]] = {}
+        self.granular_circuit_breakers: Dict[str, Dict[str, Any]] = {} # {entity_id: {reason: str, cooldown_until: float}}
+        self.last_daily_profit_loss_reset = time.time()
 
     async def initialize_balances(self, exchange_manager: Any):
         logger.info("Initializing safety manager with current balances...")
@@ -98,20 +100,38 @@ class SafetyManager:
         self._check_risk_limits()
 
     def _check_risk_limits(self):
+        # Dynamic daily loss threshold
+        adjusted_max_daily_loss = self.risk_config["max_daily_loss_usd"]
+        if self.daily_profit_loss > 0: # If bot is profitable, allow slightly larger loss before stopping
+            adjusted_max_daily_loss += self.daily_profit_loss * self.risk_config["dynamic_loss_threshold_factor"]
+
         if self.risk_config["circuit_breaker_enabled"]:
-            if self.daily_profit_loss < -self.risk_config["max_daily_loss_usd"]:
+            if self.daily_profit_loss < -adjusted_max_daily_loss:
                 self._activate_circuit_breaker("Max daily loss exceeded")
             elif self.consecutive_losses >= self.risk_config["max_consecutive_losses"]:
                 self._activate_circuit_breaker("Max consecutive losses reached")
 
-    def _activate_circuit_breaker(self, reason: str):
-        if not self.circuit_breaker_active:
-            self.circuit_breaker_active = True
-            logger.critical(f"CIRCUIT BREAKER ACTIVATED: {reason}")
+    def _activate_circuit_breaker(self, reason: str, entity_id: Optional[str] = None, entity_type: Optional[str] = None):
+        if entity_id and entity_type:
+            # Granular circuit breaker
+            cooldown_minutes = self.risk_config["granular_circuit_breaker_cooldown_minutes"]
+            cooldown_until = time.time() + cooldown_minutes * 60
+            self.granular_circuit_breakers[f"{entity_type}:{entity_id}"] = {
+                "reason": reason,
+                "cooldown_until": cooldown_until,
+                "activated_at": time.time()
+            }
+            logger.critical(f"GRANULAR CIRCUIT BREAKER ACTIVATED for {entity_type} {entity_id}: {reason}. Cooldown until {datetime.fromtimestamp(cooldown_until).strftime('%Y-%m-%d %H:%M:%S')}")
             self.monitoring_system.alert_manager.create_alert(
-                "Circuit Breaker Activated", reason, "critical", "SafetyManager"
+                "Granular Circuit Breaker Activated", f"{reason} for {entity_type} {entity_id}", "critical", "SafetyManager"
             )
-
+        elif not self.circuit_breaker_active:
+            # Global circuit breaker
+            self.circuit_breaker_active = True
+            logger.critical(f"GLOBAL CIRCUIT BREAKER ACTIVATED: {reason}")
+            self.monitoring_system.alert_manager.create_alert(
+                "Global Circuit Breaker Activated", reason, "critical", "SafetyManager"
+            )
     def deactivate_circuit_breaker(self):
         if self.circuit_breaker_active:
             self.circuit_breaker_active = False
@@ -121,8 +141,22 @@ class SafetyManager:
                 "Circuit Breaker Deactivated", "Manual deactivation", "info", "SafetyManager"
             )
 
-    def is_circuit_breaker_active(self) -> bool:
-        return self.circuit_breaker_active
+    def is_circuit_breaker_active(self, entity_id: Optional[str] = None, entity_type: Optional[str] = None) -> bool:
+        # Check global circuit breaker
+        if self.circuit_breaker_active:
+            return True
+        
+        # Check granular circuit breaker
+        if entity_id and entity_type:
+            key = f"{entity_type}:{entity_id}"
+            if key in self.granular_circuit_breakers:
+                cooldown_until = self.granular_circuit_breakers[key]["cooldown_until"]
+                if time.time() < cooldown_until:
+                    return True
+                else:
+                    # Cooldown period ended, deactivate granular circuit breaker
+                    del self.granular_circuit_breakers[key]
+        return False
 
     def get_safety_status(self) -> Dict[str, Any]:
         return {
@@ -580,3 +614,4 @@ class SafetyManager:
             pass  # psutil not available
         
         logger.debug("Safety check completed")
+# ok

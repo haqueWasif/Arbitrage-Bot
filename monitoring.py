@@ -55,10 +55,10 @@ class AlertManager:
 
             url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
             message_text = (
-                f"*ALERT ({alert.severity.upper( )})*\n"
-                f"*Component:* `{alert.component}`\n"
-                f"*Message:* `{alert.message}`\n"
-                f"*Timestamp:* `{datetime.fromtimestamp(alert.timestamp).strftime("%Y-%m-%d %H:%M:%S")}`"
+                f"*ALERT ({alert.severity.upper()})*\n" +
+                f"*Component:* `{alert.component}`\n" +
+                f"*Message:* `{alert.message}`\n" +
+                f"*Timestamp:* `{alert.timestamp}`"
             )
             payload = {
                 "chat_id": chat_id,
@@ -66,7 +66,7 @@ class AlertManager:
                # "parse_mode": "MarkdownV2" # Use MarkdownV2 for formatting
             }
 
-            async with httpx.AsyncClient( ) as client:
+            async with httpx.AsyncClient() as client:
                 response = await client.post(url, json=payload, timeout=10)
                 response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
             logger.info(f"Successfully sent Telegram alert: {alert.message}")

@@ -10,6 +10,7 @@ import logging
 
 from arbitrage_bot import ArbitrageBot
 from config import load_config
+from websocket_manager import WebSocketManager
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,10 @@ async def main():
         
         # Create bot instance
         bot = ArbitrageBot(config)
+
+        # Initialize WebSocket Manager
+        websocket_manager = WebSocketManager(config)
+        bot.set_websocket_manager(websocket_manager)
         
         # Store bot reference for signal handler
         signal_handler.bot = bot

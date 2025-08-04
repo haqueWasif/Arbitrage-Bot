@@ -41,12 +41,13 @@ def load_config():
         "max_daily_trades": int(os.getenv("MAX_DAILY_TRADES", 1000)),
         "order_timeout_seconds": int(os.getenv("ORDER_TIMEOUT_SECONDS", 10)),
         "max_slippage_tolerance": float(os.getenv("MAX_SLIPPAGE_TOLERANCE", 0.002)), # 0.2% max slippage
+        "pre_trade_slippage_estimation_threshold": float(os.getenv("PRE_TRADE_SLIPPAGE_ESTIMATION_THRESHOLD", 0.001)), # 0.1% of expected profit
+        "adaptive_limit_order_aggressiveness": float(os.getenv("ADAPTIVE_LIMIT_ORDER_AGGRESSIVENESS", 0.0005)), # 0.05% closer to market
         "trade_symbols": [s.strip() for s in os.getenv("TRADE_SYMBOLS", "BTC/USDT,ETH/USDT").split(",")] # Changed to USDT
     }
 
 
     # Risk Management
-       # Risk Management
     RISK_CONFIG = {
         "max_daily_loss_usd": float(os.getenv("MAX_DAILY_LOSS_USD", 500.0)),
         "max_single_trade_loss_usd": float(os.getenv("MAX_SINGLE_TRADE_LOSS_USD", 50.0)),
@@ -54,7 +55,16 @@ def load_config():
         "emergency_stop_loss_pct": float(os.getenv("EMERGENCY_STOP_LOSS_PCT", 0.05)), # 5%
         "balance_check_interval_minutes": int(os.getenv("BALANCE_CHECK_INTERVAL_MINUTES", 5)),
         "max_consecutive_losses": int(os.getenv("MAX_CONSECUTIVE_LOSSES", 3)), # Max consecutive losing trades before pause
-        "circuit_breaker_enabled": os.getenv("CIRCUIT_BREAKER_ENABLED", "true").lower() == "true" # <--- ADD THIS LINE
+        "circuit_breaker_enabled": os.getenv("CIRCUIT_BREAKER_ENABLED", "true").lower() == "true",
+        "granular_circuit_breaker_cooldown_minutes": int(os.getenv("GRANULAR_CIRCUIT_BREAKER_COOLDOWN_MINUTES", 10)),
+        "dynamic_loss_threshold_factor": float(os.getenv("DYNAMIC_LOSS_THRESHOLD_FACTOR", 0.1)), # Factor to adjust daily loss limit based on profit
+        "rebalancing_threshold_pct": float(os.getenv("REBALANCING_THRESHOLD_PCT", 0.1)), # 10% imbalance triggers rebalancing
+        "opportunity_scoring_weights": {
+            "profit": float(os.getenv("OPPORTUNITY_SCORING_WEIGHT_PROFIT", 0.4)),
+            "liquidity": float(os.getenv("OPPORTUNITY_SCORING_WEIGHT_LIQUIDITY", 0.3)),
+            "volatility": float(os.getenv("OPPORTUNITY_SCORING_WEIGHT_VOLATILITY", 0.2)),
+            "historical_success": float(os.getenv("OPPORTUNITY_SCORING_WEIGHT_HISTORICAL_SUCCESS", 0.1))
+        }
     }
 
 

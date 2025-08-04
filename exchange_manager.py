@@ -294,3 +294,14 @@ class ExchangeManager:
             return config["trading_fee"]
         logger.warning(f"Trading fee not found for {exchange_id}. Returning default 0.001.")
         return 0.001
+
+    def get_exchange_volatility(self, exchange_id: str, symbol: str) -> float:
+        """Placeholder for getting exchange-specific volatility. 
+        In a real scenario, this would be calculated based on historical price data
+        or fetched from a market data provider.
+        """
+        # For now, return a dummy value. Lower value means lower volatility.
+        # This can be made dynamic based on actual market data later.
+        return 0.005 # Example: 0.5% volatility
+
+

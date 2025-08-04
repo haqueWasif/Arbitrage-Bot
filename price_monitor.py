@@ -80,14 +80,18 @@ class MarketStats:
 
     
 class PriceMonitor:
-    def __init__(self, exchange_manager: ExchangeManager, monitoring_system: Any, performance_config: Dict[str, Any]): # <--- MODIFIED LINE
+    def __init__(self, exchange_manager: ExchangeManager, monitoring_system: Any, performance_config: Dict[str, Any], websocket_manager=None):
         self.exchange_manager = exchange_manager
         self.monitoring_system = monitoring_system
         self.performance_config = performance_config
+        self.websocket_manager = websocket_manager # Will be set by ArbitrageBot
         self.tickers: Dict[str, Dict[str, Any]] = {}
         self.order_books: Dict[str, Dict[str, Any]] = {}
         self.opportunities: deque[ArbitrageOpportunity] = deque(maxlen=100)
         self.last_scan_time = time.time()
+
+    def set_websocket_manager(self, manager):
+        self.websocket_manager = manager
 
     async def start_monitoring(self):
         logger.info("Starting price monitoring...")
@@ -102,29 +106,27 @@ class PriceMonitor:
             await asyncio.sleep(self.performance_config.get("price_update_interval", 0.1))
 
     async def _scan_for_opportunities(self):
-        # Fetch tickers from all configured exchanges
-        tasks = []
-        for exchange_id in self.exchange_manager.exchanges_config.keys():
-            for symbol in ["BTC/USDT", "ETH/USDT"]: # Example symbols, expand as needed
-                tasks.append(self.exchange_manager.fetch_ticker(exchange_id, symbol))
-        
-        tickers_results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Update internal ticker cache
-        # Reset tickers for this scan to ensure fresh data
+        if not self.websocket_manager:
+            logger.warning("WebSocketManager not set. Cannot scan for opportunities.")
+            return
+
+        # Fetch tickers from WebSocketManager
         self.tickers = {}
-        
-        idx = 0
         for exchange_id in self.exchange_manager.exchanges_config.keys():
-            for symbol in ["BTC/USDT", "ETH/USDT"]:
-                ticker = tickers_results[idx]
-                if not isinstance(ticker, Exception) and ticker is not None:
+            for symbol in TRADING_CONFIG["trade_symbols"]:
+                market_data = await self.websocket_manager.get_latest_market_data(exchange_id, symbol)
+                if market_data and market_data.get("bid") is not None and market_data.get("ask") is not None:
                     if exchange_id not in self.tickers:
                         self.tickers[exchange_id] = {}
-                    self.tickers[exchange_id][symbol] = ticker
+                    self.tickers[exchange_id][symbol] = {
+                        "bid": market_data["bid"],
+                        "ask": market_data["ask"],
+                        "timestamp": market_data["timestamp"],
+                        "bids": market_data.get("bids", []),
+                        "asks": market_data.get("asks", []),
+                    }
                 else:
-                    logger.warning(f"Could not fetch valid ticker for {symbol} on {exchange_id}: {ticker}")
-                idx += 1
+                    logger.warning(f"No valid WebSocket data for {symbol} on {exchange_id}.")
 
         # Find arbitrage opportunities
         self.opportunities.clear() # Clear old opportunities
@@ -158,17 +160,32 @@ class PriceMonitor:
                         potential_profit_pct = ((sell_price - buy_price) / buy_price) * 100
                         
                         # Apply minimum profit threshold from config
-                        # Ensure self.monitoring_system.config is accessible and has TRADING_CONFIG
-                        min_profit_threshold = self.monitoring_system.config.get("TRADING_CONFIG", {}).get("min_profit_threshold", 0.001)
+                        min_profit_threshold = TRADING_CONFIG.get("min_profit_threshold", 0.001)
 
                         if potential_profit_pct > min_profit_threshold * 100:
-                            # Placeholder for max_quantity calculation (e.g., based on available balance, order book depth)
-                            # Calculate max_quantity based on a percentage of available capital
-                            # For simplicity, assuming available capital is represented by the MAX_TRADE_AMOUNT_USD for now
-                            # In a real scenario, this would involve fetching actual exchange balances.
-                            trade_percentage = 0.01 # Example: 1% of capital per trade
-                            max_quantity = max(0.001, (TRADING_CONFIG.get("max_trade_amount_usd") * trade_percentage) / buy_price)
+                            # Dynamic max_quantity based on order book depth and volume
+                            buy_order_book = buy_exchange_tickers[symbol].get("asks", [])
+                            sell_order_book = sell_exchange_tickers[symbol].get("bids", [])
+
+                            # Calculate max tradable quantity considering order book depth
+                            max_quantity = self._calculate_max_tradable_quantity(
+                                buy_price, sell_price, buy_order_book, sell_order_book, min_profit_threshold
+                            )
+
+                            if max_quantity <= 0:
+                                continue # No profitable quantity found
+
                             potential_profit_usd = (sell_price - buy_price) * max_quantity
+                            
+                            # Opportunity Scoring
+                            opportunity_score = self._score_opportunity(
+                                potential_profit_pct, max_quantity, 
+                                self.exchange_manager.get_exchange_trading_fee(buy_exchange_id),
+                                self.exchange_manager.get_exchange_trading_fee(sell_exchange_id),
+                                self.exchange_manager.get_exchange_volatility(buy_exchange_id, symbol), # Placeholder for actual volatility
+                                self.exchange_manager.get_exchange_volatility(sell_exchange_id, symbol) # Placeholder for actual volatility
+                            )
+
                             opportunity = ArbitrageOpportunity(
                                 symbol=symbol,
                                 buy_exchange=buy_exchange_id,
@@ -178,7 +195,8 @@ class PriceMonitor:
                                 potential_profit_pct=potential_profit_pct,
                                 potential_profit_usd=potential_profit_usd,
                                 max_quantity=max_quantity,
-                                timestamp=time.time()
+                                timestamp=time.time(),
+                                score=opportunity_score
                             )
                             self.opportunities.append(opportunity)
                             opportunities_found_total += 1
@@ -200,3 +218,60 @@ class PriceMonitor:
     def get_market_summary(self) -> Dict[str, Any]:
         summary = {"tickers": self.tickers, "last_scan": self.last_scan_time}
         return summary
+
+    def _calculate_max_tradable_quantity(self, buy_price, sell_price, buy_order_book, sell_order_book, min_profit_threshold):
+        # This is a simplified calculation. A real implementation would iterate through
+        # order book levels to find the maximum quantity that can be traded while
+        # maintaining the min_profit_threshold after accounting for fees and slippage.
+        # For now, we'll take the minimum of the top-level quantities.
+        
+        buy_quantity = 0
+        if buy_order_book:
+            # Assuming buy_order_book is a list of [price, quantity]
+            buy_quantity = buy_order_book[0][1] # Quantity at the best ask
+
+        sell_quantity = 0
+        if sell_order_book:
+            # Assuming sell_order_book is a list of [price, quantity]
+            sell_quantity = sell_order_book[0][1] # Quantity at the best bid
+
+        # Consider the minimum of the available quantities on both sides
+        max_quantity = min(buy_quantity, sell_quantity)
+
+        # Further refine max_quantity based on MAX_TRADE_AMOUNT_USD from config
+        max_trade_amount_usd = TRADING_CONFIG.get("max_trade_amount_usd", 100.0)
+        max_quantity_from_usd = max_trade_amount_usd / buy_price if buy_price > 0 else 0
+        max_quantity = min(max_quantity, max_quantity_from_usd)
+
+        return max(0.0, max_quantity)
+
+    def _score_opportunity(self, potential_profit_pct, max_quantity, buy_fee, sell_fee, buy_volatility, sell_volatility):
+        # Implement a comprehensive scoring system for arbitrage opportunities
+        # This is a simplified example, weights can be adjusted in config.py
+        
+        profit_weight = RISK_CONFIG["opportunity_scoring_weights"]["profit"]
+        liquidity_weight = RISK_CONFIG["opportunity_scoring_weights"]["liquidity"]
+        volatility_weight = RISK_CONFIG["opportunity_scoring_weights"]["volatility"]
+        historical_success_weight = RISK_CONFIG["opportunity_scoring_weights"]["historical_success"]
+
+        # Normalize profit (example: scale to 0-100)
+        normalized_profit = min(potential_profit_pct * 10, 100) # Assuming 10% profit is high
+
+        # Normalize liquidity (example: scale based on a max quantity, e.g., 10 BTC)
+        normalized_liquidity = min(max_quantity / 10.0 * 100, 100) # Assuming 10 BTC is high liquidity
+
+        # Volatility (lower is better, so invert score)
+        # Assuming volatility is a small number, e.g., 0.01 for 1% volatility
+        normalized_volatility = max(0, 100 - (buy_volatility + sell_volatility) * 1000) # Scale and invert
+
+        # Historical success (placeholder, would come from trade history analysis)
+        # For now, assume a default high value, or integrate with a real historical success rate
+        historical_success_score = 80 # Placeholder
+
+        score = (
+            normalized_profit * profit_weight +
+            normalized_liquidity * liquidity_weight +
+            normalized_volatility * volatility_weight +
+            historical_success_score * historical_success_weight
+        )
+        return score

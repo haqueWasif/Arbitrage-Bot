@@ -197,10 +197,13 @@ class TradingEngine:
         return True
     
     def _calculate_trade_size(self, opportunity: ArbitrageOpportunity) -> float:
-        """Calculate optimal trade size based on available capital and risk limits."""
+        """Calculate optimal trade size based on available capital, risk limits, and opportunity liquidity."""
+        # The max_quantity from the opportunity is already calculated based on order book depth and profitability
+        # in price_monitor.py. We will use this as the primary determinant.
+        
         # Get available balances
-        base_currency = opportunity.symbol.split('/')[0]
-        quote_currency = opportunity.symbol.split('/')[1]
+        base_currency = opportunity.symbol.split("/")[0]
+        quote_currency = opportunity.symbol.split("/")[1]
         
         buy_balance = self.exchange_manager.get_balance(
             opportunity.buy_exchange, quote_currency
@@ -210,26 +213,31 @@ class TradingEngine:
         )
         
         # Calculate maximum tradeable amount based on balances
-        max_by_buy_balance = buy_balance / opportunity.buy_price
+        max_by_buy_balance = buy_balance / opportunity.buy_price if opportunity.buy_price > 0 else 0
         max_by_sell_balance = sell_balance
-        max_by_liquidity = opportunity.max_quantity
         
-        # Take the minimum
-        max_amount = min(max_by_buy_balance, max_by_sell_balance, max_by_liquidity)
+        # Take the minimum of the opportunity's max_quantity and available balances
+        max_amount = min(opportunity.max_quantity, max_by_buy_balance, max_by_sell_balance)
         
-        # Apply trade size limits
-        max_trade_value_usd = TRADING_CONFIG['max_trade_amount_usd']
-        max_by_trade_limit = max_trade_value_usd / opportunity.buy_price
+        # Apply overall trade size limits from config (e.g., MAX_TRADE_AMOUNT_USD)
+        max_trade_value_usd = TRADING_CONFIG["max_trade_amount_usd"]
+        max_by_trade_limit = max_trade_value_usd / opportunity.buy_price if opportunity.buy_price > 0 else 0
         
         final_amount = min(max_amount, max_by_trade_limit)
         
         # Ensure minimum trade size (e.g., $10 equivalent)
         min_trade_value = 10.0
-        min_amount = min_trade_value / opportunity.buy_price
+        min_amount = min_trade_value / opportunity.buy_price if opportunity.buy_price > 0 else 0
         
         if final_amount < min_amount:
             return 0.0
         
+        # Dynamic capital allocation based on opportunity score (higher score, potentially larger trade)
+        # This is a simple linear scaling; more complex models could be used.
+        # Assuming score is between 0 and 100
+        score_factor = opportunity.score / 100.0 if opportunity.score else 0.5 # Default to 0.5 if no score
+        final_amount *= score_factor
+
         return final_amount
     
     def _create_arbitrage_trade(
@@ -282,13 +290,46 @@ class TradingEngine:
                    f"at {trade.sell_order.price:.6f}")
         
         try:
+            # Pre-trade slippage estimation
+            estimated_buy_slippage = await self._estimate_slippage(
+                trade.buy_order.exchange, trade.buy_order.symbol, trade.buy_order.side, 
+                trade.buy_order.amount, trade.buy_order.price
+            )
+            estimated_sell_slippage = await self._estimate_slippage(
+                trade.sell_order.exchange, trade.sell_order.symbol, trade.sell_order.side, 
+                trade.sell_order.amount, trade.sell_order.price
+            )
+
+            total_estimated_slippage = estimated_buy_slippage + estimated_sell_slippage
+            expected_profit_usd = trade.opportunity.potential_profit_usd
+
+            if expected_profit_usd > 0 and total_estimated_slippage > TRADING_CONFIG["pre_trade_slippage_estimation_threshold"] * expected_profit_usd:
+                logger.warning(f"Trade {trade.id} skipped due to high estimated slippage: {total_estimated_slippage:.4f} > {TRADING_CONFIG['pre_trade_slippage_estimation_threshold'] * expected_profit_usd:.4f}")
+                trade.status = TradeStatus.FAILED
+                trade.error_message = "High estimated slippage"
+                self._move_to_completed(trade)
+                return
+
+            # Adaptive Limit Orders
+            buy_price = trade.buy_order.price
+            sell_price = trade.sell_order.price
+
+            if trade.opportunity.score and trade.opportunity.score > 70: # Example: high score opportunities
+                # Make buy order slightly more aggressive (higher price)
+                buy_price *= (1 + TRADING_CONFIG["adaptive_limit_order_aggressiveness"])
+                # Make sell order slightly more aggressive (lower price)
+                sell_price *= (1 - TRADING_CONFIG["adaptive_limit_order_aggressiveness"])
+                logger.info(f"Adjusting limit orders for high-score opportunity {trade.id}. New buy price: {buy_price:.6f}, New sell price: {sell_price:.6f}")
+
+            trade.buy_order.price = buy_price
+            trade.sell_order.price = sell_price
+
             # Place both orders simultaneously
             buy_task = asyncio.create_task(self._place_order(trade.buy_order))
             sell_task = asyncio.create_task(self._place_order(trade.sell_order))
             
             # Wait for both orders to be placed
             await asyncio.gather(buy_task, sell_task)
-            
             # Monitor order execution
             await self._monitor_trade_execution(trade)
             
@@ -547,4 +588,45 @@ class TradingEngine:
             'start_time': time.time()
         }
         logger.info("Daily statistics reset")
+
+
+
+    async def _estimate_slippage(self, exchange_id: str, symbol: str, side: str, amount: float, price: float) -> float:
+        """Estimates potential slippage for a given order."""
+        order_book = await self.exchange_manager.get_order_book(exchange_id, symbol, limit=TRADING_CONFIG["order_book_depth"])
+        if not order_book:
+            logger.warning(f"Could not fetch order book for slippage estimation on {exchange_id} {symbol}")
+            return 0.0 # Cannot estimate slippage
+
+        if side == "buy":
+            # For a buy order, we are consuming asks
+            levels = order_book.get("asks", [])
+        else:
+            # For a sell order, we are consuming bids
+            levels = order_book.get("bids", [])
+
+        filled_amount = 0.0
+        cost = 0.0
+        for level_price, level_quantity in levels:
+            if filled_amount + level_quantity >= amount:
+                # This level fills the remaining amount
+                remaining_amount = amount - filled_amount
+                cost += remaining_amount * level_price
+                filled_amount = amount
+                break
+            else:
+                # Consume the entire level
+                cost += level_quantity * level_price
+                filled_amount += level_quantity
+        
+        if filled_amount < amount:
+            logger.warning(f"Not enough liquidity in order book to fill {amount} {symbol} on {exchange_id} for {side} order.")
+            # If not enough liquidity, assume significant slippage or partial fill
+            return 1.0 # Return a high slippage to indicate insufficient liquidity
+
+        average_fill_price = cost / amount
+        slippage_abs = abs(average_fill_price - price)
+        slippage_pct = (slippage_abs / price) if price > 0 else 0.0
+        return slippage_pct
+
 
