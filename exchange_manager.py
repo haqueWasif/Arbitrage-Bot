@@ -27,6 +27,7 @@ class ExchangeManager:
         self.exchanges_config = exchanges_config
         self.exchanges: Dict[str, Any] = {}
         self.initialized = False
+        self.trading_fees: Dict[str, float] = {}
 
     async def initialize_exchanges(self):
         if self.initialized:
@@ -65,6 +66,21 @@ class ExchangeManager:
                 markets = await asyncio.to_thread(exchange.load_markets)
                 logger.info(f"Loaded {len(markets)} markets for {exchange_id}")
                 self.exchanges[exchange_id] = exchange
+
+                # Fetch and store trading fees
+                try:
+                    # Attempt to fetch actual trading fees
+                    # This might require specific exchange methods or a generic fetch_trading_fees
+                    # For now, we'll use a placeholder or a default from config
+                    fee_info = await asyncio.to_thread(exchange.fetch_trading_fees)
+                    # Assuming fee_info structure, adjust as per actual CCXT response
+                    # This part needs to be adapted based on how CCXT returns fees for the specific exchange
+                    # For simplicity, we'll just use the default from config for now if not explicitly fetched
+                    self.trading_fees[exchange_id] = config.get("trading_fee", 0.001)
+                    logger.info(f"Fetched trading fees for {exchange_id}: {self.trading_fees[exchange_id]}")
+                except Exception as fee_e:
+                    logger.warning(f"Could not fetch trading fees for {exchange_id}: {fee_e}. Using default from config.")
+                    self.trading_fees[exchange_id] = config.get("trading_fee", 0.001)
 
             except Exception as e:
                 logger.error(f"Failed to initialize {exchange_id}: {e}")
@@ -241,7 +257,7 @@ class ExchangeManager:
         all_balances = {}
         for exchange_id, exchange in self.exchanges.items():
             try:
-                balance = exchange.fetch_balance()
+                balance = await asyncio.to_thread(exchange.fetch_balance)
                 if asyncio.iscoroutine(balance):
                     balance = await balance
             except Exception as e:
@@ -283,11 +299,7 @@ class ExchangeManager:
                 
     def get_exchange_trading_fee(self, exchange_id: str) -> float:
         """Returns the configured trading fee for a given exchange."""
-        config = self.exchanges_config.get(exchange_id)
-        if config and "trading_fee" in config:
-            return config["trading_fee"]
-        logger.warning(f"Trading fee not found for {exchange_id}. Returning default 0.001.")
-        return 0.001
+        return self.trading_fees.get(exchange_id, 0.001) # Default to 0.001 if not found
 
     def get_exchange_volatility(self, exchange_id: str, symbol: str) -> float:
         """Placeholder for getting exchange-specific volatility. 
@@ -297,5 +309,6 @@ class ExchangeManager:
         # For now, return a dummy value. Lower value means lower volatility.
         # This can be made dynamic based on actual market data later.
         return 0.005 # Example: 0.5% volatility
+
 
 

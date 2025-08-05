@@ -2,7 +2,8 @@ import asyncio
 import logging
 import json
 import websockets
-from pybit.unified_trading import WebSocket as BybitWebSocket
+import ccxt.async_support as ccxt
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -13,92 +14,139 @@ class WebSocketManager:
         self.trade_symbols = config["TRADING_CONFIG"]["trade_symbols"]
         self.market_data = {}
         self.lock = asyncio.Lock()
-        self.bybit_ws = None
+        self.exchange_ws_clients = {}
+        self.binance_ws_url = "wss://stream.binance.com:9443/ws/" # Default for production
+        if self.exchanges_config.get("binance", {}).get("sandbox", False):
+            self.binance_ws_url = "wss://stream.testnet.binance.vision/ws/" # Binance testnet WebSocket URL
+        self.binance_update_count = 0
+        self.bybit_update_count = 0
 
     async def start(self):
-        """Start Binance & Bybit WebSocket connections."""
-        await asyncio.gather(
-            self._run_binance_stream(),
-            self._run_bybit_streams(),
-        )
-        logger.info("WebSocket Manager started for Binance and Bybit.")
+        """Start WebSocket connections for all configured exchanges."""
+        tasks = []
+        for exchange_id, exchange_config in self.exchanges_config.items():
+            if exchange_config.get("api_key") and exchange_config.get("secret"):
+                if exchange_id == "binance":
+                    tasks.append(self._connect_binance_native_ws())
+                else:
+                    tasks.append(self._connect_and_subscribe(exchange_id, exchange_config))
+        await asyncio.gather(*tasks)
+        logger.info("WebSocket Manager started for all configured exchanges.")
 
-    # -------------------- BINANCE --------------------
-    async def _run_binance_stream(self):
-        """Connect to Binance multi-stream WebSocket for all symbols."""
-        streams = [f"{s.lower()}@ticker" for s in self.trade_symbols]
-        stream_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
+    async def _connect_binance_native_ws(self):
+        """Connects to Binance native WebSocket and subscribes to all-ticker stream."""
+        stream_name = "!ticker@arr"
+        uri = f"{self.binance_ws_url}{stream_name}"
+        logger.info(f"Connecting to Binance native WebSocket: {uri}")
 
         while True:
             try:
-                logger.info(f"Connecting to Binance WS for symbols: {self.trade_symbols}")
-                async with websockets.connect(
-                    stream_url,
-                    open_timeout=30,    # increase handshake timeout
-                    ping_interval=20,
-                    ping_timeout=20
-                ) as ws:
+                async with websockets.connect(uri) as websocket:
+                    logger.info(f"Connected to Binance native WebSocket: {uri}")
                     while True:
-                        msg = await ws.recv()
-                        data = json.loads(msg)
-                        
-                        # Binance multi-stream returns {"stream": "...", "data": {...}}
-                        stream_name = data.get("stream", "")
-                        payload = data.get("data", {})
+                        message = await websocket.recv()
+                        data = json.loads(message)
+                        if "data" in data and isinstance(data["data"], list):
+                            for ticker_data in data["data"]:
+                                symbol = ticker_data["s"] # Symbol, e.g., BTCUSDT
+                                if symbol in self.trade_symbols:
+                                    async with self.lock:
+                                        self.market_data.setdefault("binance", {})[symbol] = {
+                                            "bid": float(ticker_data["b"]),
+                                            "ask": float(ticker_data["a"]),
+                                            "timestamp": ticker_data["E"],
+                                            "datetime": datetime.fromtimestamp(ticker_data["E"] / 1000).isoformat(),
+                                            "high": float(ticker_data["h"]),
+                                            "low": float(ticker_data["l"]),
+                                            "volume": float(ticker_data["v"]),
+                                            "quoteVolume": float(ticker_data["q"]),
+                                            "info": ticker_data,
+                                            "bids": [],
+                                            "asks": []
+                                        }
+                                    self.binance_update_count += 1
+                                    if self.binance_update_count % 100 == 0: # Log every 100 updates
+                                        logger.info(f"Binance native WS update for {symbol}: Bid={ticker_data['b']}, Ask={ticker_data['a']}. Total updates: {self.binance_update_count}")
+            except Exception as e:
+                logger.error(f"Binance native WebSocket error: {e}. Reconnecting in 5 seconds...")
+                await asyncio.sleep(5)
 
-                        if stream_name and payload:
-                            symbol = payload.get("s")  # Binance ticker symbol (e.g., BTCUSDT)
-                            if symbol:
-                                async with self.lock:
-                                    self.market_data.setdefault("binance", {})[symbol] = payload
-                                logger.debug(f"Binance update for {symbol}: {payload}")
+    async def _connect_and_subscribe(self, exchange_id, exchange_config):
+        """Connects to exchange WebSocket using CCXT and subscribes to tickers with retry logic."""
+        retries = 0
+        max_retries = 5
+        while retries < max_retries:
+            try:
+                exchange_class = getattr(ccxt, exchange_id)
+                exchange = exchange_class({
+                    'apiKey': exchange_config['api_key'],
+                    'secret': exchange_config['secret'],
+                    'enableRateLimit': True,
+                    'options': {
+                        'defaultType': 'spot',
+                    }
+                })
+
+                if exchange_config.get("sandbox", False):
+                    try:
+                        exchange.set_sandbox_mode(True)
+                        logger.info(f"Set {exchange_id} to SANDBOX mode.")
+                    except Exception as sandbox_error:
+                        logger.warning(f"Sandbox mode not supported for {exchange_id}: {sandbox_error}")
+
+                self.exchange_ws_clients[exchange_id] = exchange
+                logger.info(f"Initialized CCXT client for {exchange_id}.")
+
+                await exchange.load_markets()
+
+                for symbol in self.trade_symbols:
+                    asyncio.create_task(self._watch_ticker(exchange, exchange_id, symbol))
+                return # Exit loop on successful connection
 
             except Exception as e:
-                logger.error(f"Binance WS error: {repr(e)}", exc_info=True)
-                await asyncio.sleep(5)  # retry after short delay
+                retries += 1
+                delay = 2 ** retries # Exponential backoff
+                logger.error(f"Failed to connect or subscribe to {exchange_id} WebSocket (Attempt {retries}/{max_retries}): {e}. Retrying in {delay} seconds...")
+                await asyncio.sleep(delay)
+        logger.critical(f"Failed to connect to {exchange_id} WebSocket after {max_retries} attempts. Please check API keys and network access.")
 
-    # -------------------- BYBIT --------------------
-    async def _run_bybit_streams(self):
-        """Connect to Bybit WebSocket for all symbols."""
-        exchange_config = self.exchanges_config.get("bybit", {})
-        api_key = exchange_config.get("api_key")
-        api_secret = exchange_config.get("secret")
-        sandbox = exchange_config.get("sandbox", False)
-
-        logger.info("Connecting to Bybit WebSocket (testnet=%s)...", sandbox)
-        self.bybit_ws = BybitWebSocket(
-            testnet=sandbox,
-            channel_type="spot",
-            api_key=api_key,
-            api_secret=api_secret
-        )
-
-        loop = asyncio.get_running_loop()
-
-        def make_callback(symbol):
-            def callback(msg):
-                loop.call_soon_threadsafe(
-                    asyncio.create_task,
-                    self._bybit_update("bybit", symbol, msg)
-                )
-            return callback
-
-        for symbol in self.trade_symbols:
-            self.bybit_ws.trade_stream(callback=make_callback(symbol), symbol=symbol)
-
+    async def _watch_ticker(self, exchange, exchange_id, symbol):
+        """Watches ticker data for a given exchange and symbol using CCXT."""
         while True:
-            await asyncio.sleep(3600)
+            try:
+                ticker = await exchange.watch_ticker(symbol)
+                async with self.lock:
+                    self.market_data.setdefault(exchange_id, {})[symbol] = {
+                        "bid": ticker["bid"],
+                        "ask": ticker["ask"],
+                        "timestamp": ticker["timestamp"],
+                        "datetime": ticker["datetime"],
+                        "high": ticker["high"],
+                        "low": ticker["low"],
+                        "volume": ticker["baseVolume"],
+                        "quoteVolume": ticker["quoteVolume"],
+                        "info": ticker["info"],
+                        "bids": [],
+                        "asks": []
+                    }
+                self.bybit_update_count += 1
+                if self.bybit_update_count % 100 == 0: # Log every 100 updates
+                    logger.info(f"Updated {symbol} on {exchange_id}: Bid={ticker['bid']}, Ask={ticker['ask']}. Total updates: {self.bybit_update_count}")
+            except Exception as e:
+                logger.error(f"Error watching ticker for {symbol} on {exchange_id}: {e}")
+                await asyncio.sleep(5)
 
-    async def _bybit_update(self, exchange_id, symbol, data):
-        async with self.lock:
-            self.market_data.setdefault(exchange_id, {})[symbol] = data
-        logger.debug(f"Bybit update: {symbol} {data}")
-
-    # -------------------- UTILITIES --------------------
     async def get_latest_market_data(self, exchange_id, symbol):
+        logger.debug(f"Attempting to retrieve market data for {symbol} on {exchange_id}")
         async with self.lock:
             return self.market_data.get(exchange_id, {}).get(symbol, None)
 
-    async def stop(self):
+    async def close(self):
         logger.info("Stopping WebSocket Manager...")
-        self.bybit_ws = None
+        for exchange_id, client in self.exchange_ws_clients.items():
+            if client and hasattr(client, 'close'):
+                await client.close()
+                logger.info(f"Closed CCXT WebSocket client for {exchange_id}.")
+        logger.info("WebSocket Manager stopped.")
+
+

@@ -6,6 +6,7 @@ import logging
 load_dotenv()
 
 
+
 def load_config():
     """Loads and returns the configuration for the arbitrage bot."""
 
@@ -18,13 +19,13 @@ def load_config():
             "rate_limit": 1200,  # requests per minute
             "trading_fee": 0.001  # 0.1%
         },
-        "bybit": {
-            "api_key": os.getenv("BYBIT_API_KEY"),
-            "secret": os.getenv("BYBIT_SECRET"),
-            "sandbox": os.getenv("BYBIT_SANDBOX", "false").lower() == "true",
-            "rate_limit": 60,  # requests per minute
-            "trading_fee": 0.001 # 0.1%
-        },
+        # "bybit": {
+        #     "api_key": os.getenv("BYBIT_API_KEY"),
+        #     "secret": os.getenv("BYBIT_SECRET"),
+        #     "sandbox": os.getenv("BYBIT_SANDBOX", "false").lower() == "true",
+        #     "rate_limit": 60,  # requests per minute
+        #     "trading_fee": 0.001 # 0.1%
+        # },
         # Add other exchanges here as needed
     }
 
@@ -152,3 +153,5 @@ RISK_CONFIG = CONFIG["RISK_CONFIG"]
 PERFORMANCE_CONFIG = CONFIG["PERFORMANCE_CONFIG"]
 MONITORING_CONFIG = CONFIG["MONITORING_CONFIG"]
 LOGGING_CONFIG = CONFIG["LOGGING_CONFIG"]
+
+

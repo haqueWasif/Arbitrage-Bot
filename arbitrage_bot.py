@@ -1,7 +1,7 @@
 import asyncio
 import time
 import logging
-import logging.handlers # <--- ADD THIS LINE
+import logging.handlers
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
@@ -93,7 +93,23 @@ class TradingEngine:
          return
   
       trade_id = str(uuid.uuid4())
-      trade = Trade(id=trade_id, opportunity=opportunity, amount=opportunity.max_quantity)
+      
+      # Dynamic position sizing
+      dynamic_trade_amount_usd = self.safety_manager.get_dynamic_trade_size(
+          opportunity.symbol,
+          opportunity.potential_profit_pct,
+          self.exchange_manager.get_exchange_volatility(opportunity.buy_exchange, opportunity.symbol) # Using buy exchange for volatility
+      )
+      
+      # Convert USD amount to base currency amount using the buy price
+      # Ensure buy_price is not zero to avoid division by zero
+      if opportunity.buy_price and opportunity.buy_price > 0:
+          trade_amount = dynamic_trade_amount_usd / opportunity.buy_price
+      else:
+          logger.warning(f"Invalid buy price ({opportunity.buy_price}) for {opportunity.symbol}. Cannot determine trade amount.")
+          return
+
+      trade = Trade(id=trade_id, opportunity=opportunity, amount=trade_amount)
       self.active_trades[trade_id] = trade
       self.total_trades += 1
   
@@ -103,7 +119,7 @@ class TradingEngine:
          self.last_day_reset = datetime.now().day
       self.todays_trades += 1
   
-      logger.info(f"Attempting arbitrage trade {trade_id} for {opportunity.symbol} between {opportunity. buy_exchange} and {opportunity.sell_exchange}")
+      logger.info(f"Attempting arbitrage trade {trade_id} for {opportunity.symbol} between {opportunity.buy_exchange} and {opportunity.sell_exchange} with amount {trade.amount:.4f}")
       self.monitoring_system.alert_manager.create_alert(
          "Trade Attempt", f"Attempting arbitrage for {opportunity.symbol}. Profit: {opportunity.potential_profit_pct:.2f}%", "info", "TradingEngine"
      )
@@ -357,4 +373,5 @@ class ArbitrageBot:
         # Keep the event loop running until shutdown is signaled
         await self.shutdown_event.wait()
         logger.info("Bot run_forever completed.")
+
 

@@ -230,28 +230,34 @@ class PriceMonitor:
         return summary
 
     def _calculate_max_tradable_quantity(self, buy_price, sell_price, buy_order_book, sell_order_book, min_profit_threshold):
-        # This is a simplified calculation. A real implementation would iterate through
-        # order book levels to find the maximum quantity that can be traded while
-        # maintaining the min_profit_threshold after accounting for fees and slippage.
-        # For now, we'll take the minimum of the top-level quantities.
+        # This is a more robust calculation considering order book depth.
+        # It finds the maximum quantity that can be traded while maintaining the min_profit_threshold.
+
+        max_buy_quantity = 0.0
+        current_buy_cost = 0.0
+        for price, quantity in buy_order_book:
+            if price <= buy_price: # Only consider asks at or below our desired buy price
+                max_buy_quantity += quantity
+                current_buy_cost += price * quantity
+            else:
+                break # Order book is sorted by price, so we can stop
         
-        buy_quantity = 0
-        if buy_order_book:
-            # Assuming buy_order_book is a list of [price, quantity]
-            buy_quantity = buy_order_book[0][1] # Quantity at the best ask
+        max_sell_quantity = 0.0
+        current_sell_revenue = 0.0
+        for price, quantity in sell_order_book:
+            if price >= sell_price: # Only consider bids at or above our desired sell price
+                max_sell_quantity += quantity
+                current_sell_revenue += price * quantity
+            else:
+                break # Order book is sorted by price, so we can stop
 
-        sell_quantity = 0
-        if sell_order_book:
-            # Assuming sell_order_book is a list of [price, quantity]
-            sell_quantity = sell_order_book[0][1] # Quantity at the best bid
-
-        # Consider the minimum of the available quantities on both sides
-        max_quantity = min(buy_quantity, sell_quantity)
+        # The actual tradable quantity is limited by the liquidity on both sides
+        tradable_quantity = min(max_buy_quantity, max_sell_quantity)
 
         # Further refine max_quantity based on MAX_TRADE_AMOUNT_USD from config
         max_trade_amount_usd = TRADING_CONFIG.get("max_trade_amount_usd", 100.0)
         max_quantity_from_usd = max_trade_amount_usd / buy_price if buy_price > 0 else 0
-        max_quantity = min(max_quantity, max_quantity_from_usd)
+        max_quantity = min(tradable_quantity, max_quantity_from_usd)
 
         return max(0.0, max_quantity)
 
@@ -285,3 +291,4 @@ class PriceMonitor:
             historical_success_score * historical_success_weight
         )
         return score 
+
