@@ -5,9 +5,10 @@ import logging
 # Load environment variables from .env file
 load_dotenv()
 
+
 def load_config():
     """Loads and returns the configuration for the arbitrage bot."""
-    
+
     # Exchange API Credentials
     EXCHANGES = {
         "binance": {
@@ -24,14 +25,7 @@ def load_config():
             "rate_limit": 60,  # requests per minute
             "trading_fee": 0.001 # 0.1%
         },
-        # "kraken": {
-        #     "api_key": os.getenv("KRAKEN_API_KEY"),
-        #     "secret": os.getenv("KRAKEN_SECRET"),
-        #     "sandbox": os.getenv("KRAKEN_SANDBOX", "false").lower() == "true",
-        #     "rate_limit": 60,  # requests per minute
-        #     "trading_fee": 0.0026 # 0.26%
-        # }
-        # Coinbase entry has been removed
+        # Add other exchanges here as needed
     }
 
     # Trading Configuration
@@ -43,9 +37,9 @@ def load_config():
         "max_slippage_tolerance": float(os.getenv("MAX_SLIPPAGE_TOLERANCE", 0.002)), # 0.2% max slippage
         "pre_trade_slippage_estimation_threshold": float(os.getenv("PRE_TRADE_SLIPPAGE_ESTIMATION_THRESHOLD", 0.001)), # 0.1% of expected profit
         "adaptive_limit_order_aggressiveness": float(os.getenv("ADAPTIVE_LIMIT_ORDER_AGGRESSIVENESS", 0.0005)), # 0.05% closer to market
-        "trade_symbols": [s.strip() for s in os.getenv("TRADE_SYMBOLS", "BTC/USDT,ETH/USDT").split(",")] # Changed to USDT
+        # Symbols for native websocket APIs (no slash, uppercase)
+        "trade_symbols": [s.strip().replace("/", "").upper() for s in os.getenv("TRADE_SYMBOLS", "BTCUSDT,ETHUSDT").split(",")]
     }
-
 
     # Risk Management
     RISK_CONFIG = {
@@ -66,7 +60,6 @@ def load_config():
             "historical_success": float(os.getenv("OPPORTUNITY_SCORING_WEIGHT_HISTORICAL_SUCCESS", 0.1))
         }
     }
-
 
     # Database Configuration
     DB_CONFIG = {
@@ -115,15 +108,28 @@ def load_config():
         "secret_key": os.getenv("FLASK_SECRET_KEY", "your-secret-key-here")
     }
 
-    # Performance Tuning
+    # Performance Tuning + new websocket options
     PERFORMANCE_CONFIG = {
         "max_concurrent_requests": int(os.getenv("MAX_CONCURRENT_REQUESTS", 50)),
         "request_timeout_seconds": float(os.getenv("REQUEST_TIMEOUT_SECONDS", 10)),
         "websocket_ping_interval": int(os.getenv("WEBSOCKET_PING_INTERVAL", 30)),
         "order_book_depth": int(os.getenv("ORDER_BOOK_DEPTH", 20)),
-        "price_update_interval": float(os.getenv("PRICE_UPDATE_INTERVAL", 0.1)), # How often to scan for opportunities
-        "main_loop_interval": float(os.getenv("MAIN_LOOP_INTERVAL", 1)), # How often the main bot loop runs
-        "opportunity_scan_interval": float(os.getenv("OPPORTUNITY_SCAN_INTERVAL", 0.05)) # Small delay between processing opportunities
+        "price_update_interval": float(os.getenv("PRICE_UPDATE_INTERVAL", 0.1)),
+        "main_loop_interval": float(os.getenv("MAIN_LOOP_INTERVAL", 1)),
+        "opportunity_scan_interval": float(os.getenv("OPPORTUNITY_SCAN_INTERVAL", 0.05)),
+        "websocket_data_source": os.getenv("WEBSOCKET_DATA_SOURCE", "native_websocket"),  # use native exchange websockets
+        "websocket_urls": {
+            "binance": os.getenv("BINANCE_WS_URL", ""),
+            "bybit": os.getenv("BYBIT_WS_URL", "")
+        },
+        "WEBSOCKET_CONFIG": {
+            "binance": {
+                "ping_interval": int(os.getenv("BINANCE_WS_PING_INTERVAL", 20)),
+            },
+            "bybit": {
+                "ping_interval": int(os.getenv("BYBIT_WS_PING_INTERVAL", 25)),
+            }
+        }
     }
 
     return {
@@ -138,9 +144,7 @@ def load_config():
         "PERFORMANCE_CONFIG": PERFORMANCE_CONFIG
     }
 
-# If you want to access these directly in other modules for convenience (e.g., for quick scripts)
-# you can uncomment the following lines, but it's generally better to call load_config()
-# when you need the configuration.
+
 CONFIG = load_config()
 EXCHANGES = CONFIG["EXCHANGES"]
 TRADING_CONFIG = CONFIG["TRADING_CONFIG"]

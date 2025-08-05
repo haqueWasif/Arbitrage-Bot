@@ -113,9 +113,9 @@ class TradingEngine:
   
       try:
          ticker = await self.exchange_manager.fetch_ticker(opportunity.buy_exchange, opportunity.symbol)
-         if ticker is None or ticker.get('ask') is None:
+         if ticker is None or ticker.get("ask") is None:
             raise ValueError(f"Could not fetch ticker or ask price for {opportunity.symbol} on {opportunity.buy_exchange}")
-         opportunity.buy_price = float(ticker['ask'])  # Use the ask price for buying
+         opportunity.buy_price = float(ticker["ask"])  # Use the ask price for buying
         
         
          # --- STEP 1: PLACE BUY ORDER ---
@@ -123,21 +123,21 @@ class TradingEngine:
          logger.info(f"Placing buy order for {trade.amount} {opportunity.symbol} on {opportunity.buy_exchange} at {opportunity.buy_price}")
 
          buy_order = await self.exchange_manager.place_order(
-             opportunity.buy_exchange, opportunity.symbol, 'limit', 'buy', trade.amount, opportunity.buy_price
+             opportunity.buy_exchange, opportunity.symbol, "limit", "buy", trade.amount, opportunity.buy_price
          )
  
          # If missing price, fetch details
-         if not buy_order or buy_order.get('price') is None:
-             if buy_order and buy_order.get('id'):
+         if not buy_order or buy_order.get("price") is None:
+             if buy_order and buy_order.get("id"):
                  logger.warning(f"Buy order missing price, fetching details for {buy_order['id']}...")
-                 buy_order = await self.exchange_manager.fetch_order(opportunity.buy_exchange, opportunity.symbol, buy_order['id'])
+                 buy_order = await self.exchange_manager.fetch_order(opportunity.buy_exchange, opportunity.symbol, buy_order["id"])
  
          # Validate
-         if not buy_order or buy_order.get('price') is None:
+         if not buy_order or buy_order.get("price") is None:
              raise ValueError(f"Buy order failed or returned invalid price after fetch: {buy_order}")
  
-         trade.buy_order_id = buy_order['id']
-         trade.buy_price = float(buy_order.get('price', opportunity.buy_price))
+         trade.buy_order_id = buy_order["id"]
+         trade.buy_price = float(buy_order.get("price", opportunity.buy_price))
          trade.status = TradeStatus.BUY_FILLED
          logger.info(f"Buy order {trade.buy_order_id} filled on {opportunity.buy_exchange}.")
  
@@ -146,17 +146,17 @@ class TradingEngine:
          logger.info(f"Placing sell order for {trade.amount} {opportunity.symbol} on {opportunity.sell_exchange} at {opportunity.sell_price}")
  
          sell_order = await self.exchange_manager.place_order(
-             opportunity.sell_exchange, opportunity.symbol, 'limit', 'sell', trade.amount, opportunity.sell_price
+             opportunity.sell_exchange, opportunity.symbol, "limit", "sell", trade.amount, opportunity.sell_price
          )
  
          # If missing price, fetch details
-         if not sell_order or sell_order.get('price') is None:
-             if sell_order and sell_order.get('id'):
+         if not sell_order or sell_order.get("price") is None:
+             if sell_order and sell_order.get("id"):
                  logger.warning(f"Sell order missing price, fetching details for {sell_order['id']}...")
-                 sell_order = await self.exchange_manager.fetch_order(opportunity.sell_exchange, opportunity.symbol, sell_order['id'])
+                 sell_order = await self.exchange_manager.fetch_order(opportunity.sell_exchange, opportunity.symbol, sell_order["id"])
  
-         trade.sell_order_id = sell_order['id'] if sell_order else None
-         trade.sell_price = float(sell_order.get('price', opportunity.sell_price)) if sell_order else opportunity.sell_price
+         trade.sell_order_id = sell_order["id"] if sell_order else None
+         trade.sell_price = float(sell_order.get("price", opportunity.sell_price)) if sell_order else opportunity.sell_price
          trade.status = TradeStatus.SELL_FILLED
          logger.info(f"Sell order {trade.sell_order_id} filled on {opportunity.sell_exchange}.")
  
@@ -215,8 +215,8 @@ class ArbitrageBot:
         self.monitoring_system = MonitoringSystem(config)
         self.error_handler = ErrorHandler(self.monitoring_system)
         self.safety_manager = SafetyManager(self.monitoring_system, config["RISK_CONFIG"])
-        self.websocket_manager = WebSocketManager(config)
-        self.price_monitor = PriceMonitor(self.exchange_manager, self.monitoring_system, config["PERFORMANCE_CONFIG"], self.websocket_manager)
+        self.websocket_manager = None # Initialize as None, set later
+        self.price_monitor = PriceMonitor(self.exchange_manager, self.monitoring_system, config["PERFORMANCE_CONFIG"])
         self.trading_engine = TradingEngine(self.exchange_manager, self.safety_manager, self.error_handler, self.monitoring_system)
         
         self.is_running = False
@@ -225,6 +225,14 @@ class ArbitrageBot:
 
         # Configure logging for the bot
         self._setup_logging()
+
+    def set_websocket_manager(self, manager):
+        self.websocket_manager = manager
+        logger.info("WebSocketManager set on ArbitrageBot.")
+        self.price_monitor.set_websocket_manager(manager)
+        logger.info("WebSocketManager set on PriceMonitor.")
+
+
 
     def _setup_logging(self):
         log_level = self.config["LOGGING_CONFIG"].get("level", "INFO").upper()
@@ -261,31 +269,41 @@ class ArbitrageBot:
         self.is_initialized = True
         logger.info("Bot initialization complete.")
 
+    # ArbitrageBot.start()
     async def start(self):
+        if not self.websocket_manager:
+            raise RuntimeError("WebSocketManager must be set BEFORE bot.start() is called")
+        
         if self.is_running:
             logger.info("Bot is already running.")
             return
 
         logger.info("Starting Crypto Arbitrage Bot...")
         self.is_running = True
-        self.shutdown_event.clear() # Clear event for a new run
+        self.shutdown_event.clear()
 
-        # Ensure initialization is complete before starting other components
-        await self.initialize() # <--- ENSURE THIS IS AWAITED
-
-        # Start monitoring system
+        await self.initialize()
         await self.monitoring_system.start()
 
-        # Start price monitoring
+        # Only now: start the websocket manager (already set)
+        if self.websocket_manager:
+            await self.websocket_manager.start()
+
+        # Now it's safe to start monitoring:
         asyncio.create_task(self.price_monitor.start_monitoring())
+        # ...etc.
+
 
         # Main arbitrage loop
         while not self.shutdown_event.is_set():
             try:
                 opportunities = self.price_monitor.get_arbitrage_opportunities()
+                # Sort opportunities by score (highest first)
+                opportunities.sort(key=lambda x: x.score, reverse=True)
+
                 for opportunity in opportunities:
                     if not self.shutdown_event.is_set():
-                        logger.info(f"Found opportunity: {opportunity.symbol} profit {opportunity.potential_profit_pct:.2f}%")
+                        logger.info(f"Found opportunity: {opportunity.symbol} profit {opportunity.potential_profit_pct:.2f}% (Score: {opportunity.score:.2f})")
                         asyncio.create_task(self.trading_engine.execute_arbitrage_trade(opportunity))
                         await asyncio.sleep(PERFORMANCE_CONFIG.get("opportunity_scan_interval", 0.05)) # Small delay to prevent overwhelming
 
@@ -312,6 +330,10 @@ class ArbitrageBot:
         # Stop monitoring system
         await self.monitoring_system.stop()
 
+        # Close WebSocket Manager
+        if self.websocket_manager:
+            await self.websocket_manager.close()
+
         # Cancel all active tasks (if any)
         tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         for task in tasks:
@@ -335,3 +357,4 @@ class ArbitrageBot:
         # Keep the event loop running until shutdown is signaled
         await self.shutdown_event.wait()
         logger.info("Bot run_forever completed.")
+

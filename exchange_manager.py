@@ -20,6 +20,7 @@ class ArbitrageOpportunity:
     potential_profit_usd: float
     max_quantity: float
     timestamp: float
+    score: float = 0.0 # Added score to dataclass
 
 class ExchangeManager:
     def __init__(self, exchanges_config: Dict[str, Any]):
@@ -69,13 +70,14 @@ class ExchangeManager:
                 logger.error(f"Failed to initialize {exchange_id}: {e}")
 
         self.initialized = True
+
     async def fetch_order(self, exchange_name: str, symbol: str, order_id: str):
         exchange = self.exchanges[exchange_name]
 
         try:
             # Bybit-specific fix: pass acknowledged=True
             params = {}
-            if 'bybit' in exchange.id:
+            if exchange_name == 'bybit':
                 params['acknowledged'] = True
 
             # Call fetch_order safely (async or sync)
@@ -116,114 +118,107 @@ class ExchangeManager:
 
             return None
 
-
-
     async def place_order(self, exchange_id: str, symbol: str, order_type: str, side: str, amount: float, price: float = None) -> Optional[Dict[str, Any]]:
-     def round_up(value, decimals):
-         multiplier = 10 ** decimals
-         return math.ceil(value * multiplier) / multiplier
- 
-     exchange = self.exchanges.get(exchange_id)
-     if not exchange:
-         logger.warning(f"Exchange {exchange_id} not initialized.")
-         return None
- 
-     # --- Get market info ---
-     market = exchange.markets.get(symbol)
-     if not market:
-         logger.error(f"Market {symbol} not found on {exchange_id}")
-         return None
- 
-     # --- Get min notional ---
-     min_notional = None
-     if market.get('limits'):
-         if market['limits'].get('notional'):
-             min_notional = market['limits']['notional'].get('min')
-         elif market['limits'].get('cost'):
-             min_notional = market['limits']['cost'].get('min')
- 
-     logger.info(f"min_notional (or cost min) for {symbol} on {exchange_id}: {min_notional}")
- 
-     # --- Ensure price is available ---
-     if price is None:
-         try:
-             ticker = await exchange.fetch_ticker(symbol)
-             price = ticker.get('last') or ticker.get('ask') or ticker.get('bid')
-             logger.info(f"Fetched price for {symbol} on {exchange_id}: {price}")
-         except Exception as e:
-             logger.error(f"Failed to fetch price for {symbol} on {exchange_id}: {e}")
-             return None
- 
-     if price is None:
-         logger.error(f"No price data available for {symbol} on {exchange_id}")
-         return None
- 
-     # --- Adjust amount to meet min notional ---
-     amount_precision = market.get('precision', {}).get('amount', 6)
- 
-     if min_notional:
-         notional = amount * price
-         if notional < min_notional:
-             required_amount = min_notional / price
-             adjusted_amount = round_up(required_amount, amount_precision)
- 
-             # Cap based on MAX_TRADE_AMOUNT_USD
-             MAX_TRADE_AMOUNT_USD = float(os.getenv("MAX_TRADE_AMOUNT_USD", 1.0))
-             max_amount = MAX_TRADE_AMOUNT_USD / price
-             if adjusted_amount > max_amount:
-                 logger.warning(f"Adjusted amount {adjusted_amount} > max allowed ({max_amount}), using max_amount.")
-                 adjusted_amount = max_amount
- 
-             logger.warning(
-                 f"Adjusting amount for {symbol} on {exchange_id} to meet min notional. "
-                 f"Original: {amount}, New: {adjusted_amount}"
-             )
-             amount = adjusted_amount
- 
-     # --- Final check ---
-     order_cost = amount * price
-     if min_notional and order_cost < min_notional:
-         raise ValueError(f"Order cost {order_cost} USDT below min notional {min_notional} for {symbol} on {exchange_id}")
- 
-     # --- Place order ---
-     try:
-         if order_type == "limit":
-             if side == "buy":
-                 order_creation_method = exchange.create_limit_buy_order
-             elif side == "sell":
-                 order_creation_method = exchange.create_limit_sell_order
-             else:
-                 logger.error(f"Unsupported side for limit order: {side}")
-                 return None
-             args = (symbol, amount, price)
-         elif order_type == "market":
-             if side == "buy":
-                 order_creation_method = exchange.create_market_buy_order
-             elif side == "sell":
-                 order_creation_method = exchange.create_market_sell_order
-             else:
-                 logger.error(f"Unsupported side for market order: {side}")
-                 return None
-             args = (symbol, amount)
-         else:
-             logger.error(f"Unsupported order type: {order_type}")
-             return None
- 
-         order = order_creation_method(*args)
-         if asyncio.iscoroutine(order):
-             order = await order
- 
-         logger.info(f"Placed {side} {order_type} order {order.get('id', 'N/A')} for {amount} {symbol} on {exchange_id}.")
-         return order
- 
-     except Exception as e:
-         logger.error(f"Failed to place {side} {order_type} order for {amount} {symbol} on {exchange_id}: {e}")
-         return None
-
-
-
-
-
+        def round_up(value, decimals):
+            multiplier = 10 ** decimals
+            return math.ceil(value * multiplier) / multiplier
+    
+        exchange = self.exchanges.get(exchange_id)
+        if not exchange:
+            logger.warning(f"Exchange {exchange_id} not initialized.")
+            return None
+    
+        # --- Get market info ---
+        market = exchange.markets.get(symbol)
+        if not market:
+            logger.error(f"Market {symbol} not found on {exchange_id}")
+            return None
+    
+        # --- Get min notional ---
+        min_notional = None
+        if market.get('limits'):
+            if market['limits'].get('notional'):
+                min_notional = market['limits']['notional'].get('min')
+            elif market['limits'].get('cost'):
+                min_notional = market['limits']['cost'].get('min')
+    
+        logger.info(f"min_notional (or cost min) for {symbol} on {exchange_id}: {min_notional}")
+    
+        # --- Ensure price is available ---
+        if price is None:
+            try:
+                ticker = await exchange.fetch_ticker(symbol)
+                price = ticker.get('last') or ticker.get('ask') or ticker.get('bid')
+                logger.info(f"Fetched price for {symbol} on {exchange_id}: {price}")
+            except Exception as e:
+                logger.error(f"Failed to fetch price for {symbol} on {exchange_id}: {e}")
+                return None
+    
+        if price is None:
+            logger.error(f"No price data available for {symbol} on {exchange_id}")
+            return None
+    
+        # --- Adjust amount to meet min notional ---
+        amount_precision = market.get('precision', {}).get('amount', 6)
+    
+        if min_notional:
+            notional = amount * price
+            if notional < min_notional:
+                required_amount = min_notional / price
+                adjusted_amount = round_up(required_amount, amount_precision)
+    
+                # Cap based on MAX_TRADE_AMOUNT_USD
+                MAX_TRADE_AMOUNT_USD = float(os.getenv("MAX_TRADE_AMOUNT_USD", 1.0))
+                max_amount = MAX_TRADE_AMOUNT_USD / price
+                if adjusted_amount > max_amount:
+                    logger.warning(f"Adjusted amount {adjusted_amount} > max allowed ({max_amount}), using max_amount.")
+                    adjusted_amount = max_amount
+    
+                logger.warning(
+                    f"Adjusting amount for {symbol} on {exchange_id} to meet min notional. "
+                    f"Original: {amount}, New: {adjusted_amount}"
+                )
+                amount = adjusted_amount
+    
+        # --- Final check ---
+        order_cost = amount * price
+        if min_notional and order_cost < min_notional:
+            raise ValueError(f"Order cost {order_cost} USDT below min notional {min_notional} for {symbol} on {exchange_id}")
+    
+        # --- Place order ---
+        try:
+            if order_type == "limit":
+                if side == "buy":
+                    order_creation_method = exchange.create_limit_buy_order
+                elif side == "sell":
+                    order_creation_method = exchange.create_limit_sell_order
+                else:
+                    logger.error(f"Unsupported side for limit order: {side}")
+                    return None
+                args = (symbol, amount, price)
+            elif order_type == "market":
+                if side == "buy":
+                    order_creation_method = exchange.create_market_buy_order
+                elif side == "sell":
+                    order_creation_method = exchange.create_market_sell_order
+                else:
+                    logger.error(f"Unsupported side for market order: {side}")
+                    return None
+                args = (symbol, amount)
+            else:
+                logger.error(f"Unsupported order type: {order_type}")
+                return None
+    
+            order = order_creation_method(*args)
+            if asyncio.iscoroutine(order):
+                order = await order
+    
+            logger.info(f"Placed {side} {order_type} order {order.get('id', 'N/A')} for {amount} {symbol} on {exchange_id}.")
+            return order
+    
+        except Exception as e:
+            logger.error(f"Failed to place {side} {order_type} order for {amount} {symbol} on {exchange_id}: {e}")
+            return None
 
     async def fetch_ticker(self, exchange_id: str, symbol: str) -> Optional[Dict[str, Any]]:
         exchange = self.exchanges.get(exchange_id)
@@ -241,7 +236,6 @@ class ExchangeManager:
         except Exception as e:
             logger.error(f"Failed to fetch balance: {e}")
             return 0.0
-
 
     async def get_all_balances(self) -> Dict[str, Dict[str, float]]:
         all_balances = {}

@@ -1,7 +1,3 @@
-"""
-Price Monitoring System for detecting arbitrage opportunities in real-time.
-"""
-
 import asyncio
 import logging
 import time
@@ -11,7 +7,7 @@ from collections import defaultdict, deque
 import statistics
 
 from exchange_manager import ExchangeManager, ArbitrageOpportunity
-from config import TRADING_CONFIG, PERFORMANCE_CONFIG
+from config import TRADING_CONFIG, PERFORMANCE_CONFIG, RISK_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -92,9 +88,10 @@ class PriceMonitor:
 
     def set_websocket_manager(self, manager):
         self.websocket_manager = manager
+        logger.info("WebSocketManager has been set on PriceMonitor!")  # <-- confirms manager is set
 
     async def start_monitoring(self):
-        logger.info("Starting price monitoring...")
+        logger.info(f"Starting price monitoring, websocket_manager: {self.websocket_manager}")
         while True:
             try:
                 await self._scan_for_opportunities()
@@ -104,6 +101,7 @@ class PriceMonitor:
                     "Price Monitor Error", f"Error in price monitoring loop: {e}", "error", "PriceMonitor"
                 )
             await asyncio.sleep(self.performance_config.get("price_update_interval", 0.1))
+
 
     async def _scan_for_opportunities(self):
         if not self.websocket_manager:
@@ -126,13 +124,14 @@ class PriceMonitor:
                         "asks": market_data.get("asks", []),
                     }
                 else:
-                    logger.warning(f"No valid WebSocket data for {symbol} on {exchange_id}.")
+                    # This warning is expected if data isn't immediately available, but should resolve as data streams in.
+                    logger.debug(f"No valid WebSocket data for {symbol} on {exchange_id} yet.")
 
         # Find arbitrage opportunities
         self.opportunities.clear() # Clear old opportunities
         opportunities_found_total = 0
 
-        for symbol in ["BTC/USDT", "ETH/USDT"]:
+        for symbol in TRADING_CONFIG["trade_symbols"]:
             for buy_exchange_id, buy_exchange_tickers in self.tickers.items():
                 if symbol not in buy_exchange_tickers or not buy_exchange_tickers[symbol]:
                     continue
@@ -157,49 +156,60 @@ class PriceMonitor:
 
                     # Calculate potential profit (simplified, without fees)
                     if sell_price > buy_price: # Only consider if sell price is higher than buy price
-                        potential_profit_pct = ((sell_price - buy_price) / buy_price) * 100
-                        
-                        # Apply minimum profit threshold from config
-                        min_profit_threshold = TRADING_CONFIG.get("min_profit_threshold", 0.001)
+                        # Get trading fees for both exchanges
+                        buy_fee = self.exchange_manager.get_exchange_trading_fee(buy_exchange_id)
+                        sell_fee = self.exchange_manager.get_exchange_trading_fee(sell_exchange_id)
 
-                        if potential_profit_pct > min_profit_threshold * 100:
-                            # Dynamic max_quantity based on order book depth and volume
-                            buy_order_book = buy_exchange_tickers[symbol].get("asks", [])
-                            sell_order_book = sell_exchange_tickers[symbol].get("bids", [])
+                        # Calculate profit after fees
+                        # Assuming fees are a percentage of the trade amount
+                        effective_buy_price = buy_price * (1 + buy_fee)
+                        effective_sell_price = sell_price * (1 - sell_fee)
 
-                            # Calculate max tradable quantity considering order book depth
-                            max_quantity = self._calculate_max_tradable_quantity(
-                                buy_price, sell_price, buy_order_book, sell_order_book, min_profit_threshold
-                            )
-
-                            if max_quantity <= 0:
-                                continue # No profitable quantity found
-
-                            potential_profit_usd = (sell_price - buy_price) * max_quantity
+                        if effective_sell_price > effective_buy_price:
+                            potential_profit_pct = ((effective_sell_price - effective_buy_price) / effective_buy_price) * 100
                             
-                            # Opportunity Scoring
-                            opportunity_score = self._score_opportunity(
-                                potential_profit_pct, max_quantity, 
-                                self.exchange_manager.get_exchange_trading_fee(buy_exchange_id),
-                                self.exchange_manager.get_exchange_trading_fee(sell_exchange_id),
-                                self.exchange_manager.get_exchange_volatility(buy_exchange_id, symbol), # Placeholder for actual volatility
-                                self.exchange_manager.get_exchange_volatility(sell_exchange_id, symbol) # Placeholder for actual volatility
-                            )
+                            # Apply minimum profit threshold from config
+                            min_profit_threshold = TRADING_CONFIG.get("min_profit_threshold", 0.001)
 
-                            opportunity = ArbitrageOpportunity(
-                                symbol=symbol,
-                                buy_exchange=buy_exchange_id,
-                                sell_exchange=sell_exchange_id,
-                                buy_price=buy_price,
-                                sell_price=sell_price,
-                                potential_profit_pct=potential_profit_pct,
-                                potential_profit_usd=potential_profit_usd,
-                                max_quantity=max_quantity,
-                                timestamp=time.time(),
-                                score=opportunity_score
-                            )
-                            self.opportunities.append(opportunity)
-                            opportunities_found_total += 1
+                            if potential_profit_pct > min_profit_threshold * 100:
+                                # Dynamic max_quantity based on order book depth and volume
+                                buy_order_book = buy_exchange_tickers[symbol].get("asks", [])
+                                sell_order_book = sell_exchange_tickers[symbol].get("bids", [])
+
+                                # Calculate max tradable quantity considering order book depth
+                                max_quantity = self._calculate_max_tradable_quantity(
+                                    buy_price, sell_price, buy_order_book, sell_order_book, min_profit_threshold
+                                )
+
+                                if max_quantity <= 0:
+                                    continue # No profitable quantity found
+
+                                potential_profit_usd = (effective_sell_price - effective_buy_price) * max_quantity
+                                
+                                # Opportunity Scoring
+                                opportunity_score = self._score_opportunity(
+                                    potential_profit_pct, max_quantity, 
+                                    buy_fee,
+                                    sell_fee,
+                                    # Placeholder for actual volatility, need to implement in MarketStats
+                                    0.0, # self.exchange_manager.get_exchange_volatility(buy_exchange_id, symbol),
+                                    0.0  # self.exchange_manager.get_exchange_volatility(sell_exchange_id, symbol)
+                                )
+
+                                opportunity = ArbitrageOpportunity(
+                                    symbol=symbol,
+                                    buy_exchange=buy_exchange_id,
+                                    sell_exchange=sell_exchange_id,
+                                    buy_price=buy_price,
+                                    sell_price=sell_price,
+                                    potential_profit_pct=potential_profit_pct,
+                                    potential_profit_usd=potential_profit_usd,
+                                    max_quantity=max_quantity,
+                                    timestamp=time.time(),
+                                    score=opportunity_score
+                                )
+                                self.opportunities.append(opportunity)
+                                opportunities_found_total += 1
             
             if opportunities_found_total > 0:
                 logger.info(f"Found {opportunities_found_total} arbitrage opportunities for {symbol}.")
@@ -274,4 +284,4 @@ class PriceMonitor:
             normalized_volatility * volatility_weight +
             historical_success_score * historical_success_weight
         )
-        return score
+        return score 

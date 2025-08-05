@@ -6,50 +6,52 @@ from flask import Blueprint, jsonify, request
 import asyncio
 import threading
 import time
-from typing import Optional, Dict, Any
+from typing import Optional
 import logging
 
 logger = logging.getLogger(__name__)
 
 bot_api = Blueprint("bot_api", __name__)
 
-# These will be set by the main application (dashboard/src/main.py)
 _bot_instance = None
 _monitoring_system = None
+_ws_manager = None
 _bot_thread: Optional[threading.Thread] = None
 
-def set_bot_instances(bot_instance, monitoring_system):
-    """Sets the global bot and monitoring instances for the blueprint."""
-    global _bot_instance, _monitoring_system
+def set_bot_instances(bot_instance, monitoring_system, ws_manager):
+    """
+    Sets the global bot, monitoring, and WebSocketManager instances for the blueprint.
+    Must be called from main application on setup.
+    """
+    global _bot_instance, _monitoring_system, _ws_manager
     _bot_instance = bot_instance
     _monitoring_system = monitoring_system
-    logger.info("Bot and monitoring instances set in bot_api blueprint.")
+    _ws_manager = ws_manager
+    logger.info("Bot, monitoring system, and WebSocketManager registered in bot_api blueprint.")
 
 async def _run_bot_async():
-    """Internal async function to run the bot's main loop."""
-    global _bot_instance, _monitoring_system
-    
-    if _bot_instance is None or _monitoring_system is None:
-        logger.error("Bot or monitoring system instance is None. Cannot start.")
+    global _bot_instance, _monitoring_system, _ws_manager
+
+    if _bot_instance is None or _monitoring_system is None or _ws_manager is None:
+        logger.error("Bot, monitoring system, or WebSocketManager instance is None. Cannot start.")
         return
 
     try:
-        logger.info("Attempting to initialize and start bot components...")
+        logger.info("Initializing and starting arbitrage bot components...")
+        _bot_instance.set_websocket_manager(_ws_manager)        # REQUIRED before .start()
         await _bot_instance.initialize()
         await _monitoring_system.start()
         await _bot_instance.start()
         logger.info("Bot and monitoring system started successfully.")
     except Exception as e:
         logger.error(f"Error during bot startup: {e}", exc_info=True)
-        # Attempt to stop if partial startup occurred
         if _bot_instance and _bot_instance.is_running:
             await _bot_instance.stop()
-        if _monitoring_system and _monitoring_system.is_running:
+        if _monitoring_system and hasattr(_monitoring_system, "is_running") and _monitoring_system.is_running:
             await _monitoring_system.stop()
 
 def _run_bot_in_thread_target():
     """Target function for the bot thread to run the async bot."""
-    # Create a new event loop for this thread
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(_run_bot_async())
@@ -58,7 +60,6 @@ def _run_bot_in_thread_target():
 
 @bot_api.route("/status", methods=["GET"])
 def get_bot_status():
-    """Get current bot status."""
     try:
         if _bot_instance is None:
             logger.warning("Status requested but _bot_instance is None.")
@@ -66,18 +67,16 @@ def get_bot_status():
                 "status": "stopped",
                 "message": "Bot instance not initialized"
             }), 200
-        
+
         status_data = _bot_instance.get_status()
-        
-        # Also include monitoring system status
-        monitoring_status = "running" if _monitoring_system and _monitoring_system.is_running else "stopped"
+        monitoring_status = "running" if _monitoring_system and getattr(_monitoring_system, "is_running", False) else "stopped"
         status_data["monitoring_system_status"] = monitoring_status
 
         return jsonify({
             "status": "success",
             "data": status_data
         }), 200
-        
+
     except Exception as e:
         logger.error(f"Error getting bot status: {e}", exc_info=True)
         return jsonify({
@@ -87,34 +86,30 @@ def get_bot_status():
 
 @bot_api.route("/start", methods=["POST"])
 def start_bot():
-    """Start the arbitrage bot."""
     global _bot_thread
-    
-    if _bot_instance is None or _monitoring_system is None:
+
+    if _bot_instance is None or _monitoring_system is None or _ws_manager is None:
         return jsonify({
             "status": "error",
-            "message": "Bot or monitoring system not initialized. Check server logs."
+            "message": "Bot, monitoring system, or WebSocketManager not initialized. Check server logs."
         }), 500
 
-    if _bot_instance.is_running:
+    if getattr(_bot_instance, "is_running", False):
         return jsonify({
             "status": "error",
             "message": "Bot is already running"
         }), 400
-    
+
     try:
         logger.info("Received request to start bot.")
         _bot_thread = threading.Thread(target=_run_bot_in_thread_target, daemon=True)
         _bot_thread.start()
-        
-        # Give it a moment to start and update its internal state
-        time.sleep(2) 
-        
+        time.sleep(2)  # Allow thread to start
         return jsonify({
             "status": "success",
             "message": "Bot start initiated. Check status for updates."
         }), 200
-        
+
     except Exception as e:
         logger.error(f"Error initiating bot start: {e}", exc_info=True)
         return jsonify({
@@ -124,33 +119,26 @@ def start_bot():
 
 @bot_api.route("/stop", methods=["POST"])
 def stop_bot():
-    """Stop the arbitrage bot."""
     if _bot_instance is None or _monitoring_system is None:
         return jsonify({
             "status": "error",
             "message": "Bot or monitoring system not initialized."
         }), 500
 
-    if not _bot_instance.is_running:
+    if not getattr(_bot_instance, "is_running", False):
         return jsonify({
             "status": "error",
             "message": "Bot is not running"
         }), 400
-    
+
     try:
         logger.info("Received request to stop bot. Signaling shutdown event.")
-        # Signal the bot to stop (this will be picked up by the bot's main loop)
         _bot_instance.shutdown_event.set()
-        
-        # Optionally, wait for the thread to finish, but don't block indefinitely
-        # if _bot_thread and _bot_thread.is_alive():
-        #     _bot_thread.join(timeout=5) # Wait up to 5 seconds
-
         return jsonify({
             "status": "success",
             "message": "Bot stop signal sent. Bot should shut down shortly."
         }), 200
-        
+
     except Exception as e:
         logger.error(f"Error sending stop signal to bot: {e}", exc_info=True)
         return jsonify({
